@@ -1,20 +1,40 @@
+#!/usr/bin/python3
+#-------------------------------------------------------------------------------
+#- YouFeed DataBase
+#- Copyright (C) 2013  Orochimarufan
+#-                 Authors: Orochimarufan <orochimarufan.x3@gmail.com>
+#-
+#- This program is free software: you can redistribute it and/or modify
+#- it under the terms of the GNU General Public License as published by
+#- the Free Software Foundation, either version 3 of the License, or
+#- (at your option) any later version.
+#-
+#- This program is distributed in the hope that it will be useful,
+#- but WITHOUT ANY WARRANTY; without even the implied warranty of
+#- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#- GNU General Public License for more details.
+#-
+#- You should have received a copy of the GNU General Public License
+#- along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#-------------------------------------------------------------------------------
 
 import os
 import logging
+from functools import wraps
 
+import sqlalchemy.dialects.sqlite
 from sqlalchemy import (create_engine, Table, Column, ForeignKey,
     String, Integer, DateTime, Text, Enum)
-from sqlalchemy.schema import PrimaryKeyConstraint
+from sqlalchemy.schema import PrimaryKeyConstraint, Index
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.ext.declarative import declarative_base
-from functools import wraps
 
 
 Base = declarative_base()
 logger = logging.getLogger("yfdb")
 
-# db schema version
+# yfdb schema version
 DB_VERSION = 1
 
 
@@ -27,14 +47,14 @@ class Video(Base):
     user_id = Column(String, ForeignKey('users.id'))
     local   = relationship('LocalVideo', backref='video')
     
-    title       = Column(String)
+    title       = Column(String, index=True)
     description = Column(Text)
-    categories  = Column(String)
-    keywords    = Column(String)
+    categories  = Column(String, index=True)
+    keywords    = Column(String, index=True)
     thumbnails  = Column(String)
-    uploaded    = Column(DateTime)
+    uploaded    = Column(String)
     duration    = Column(Integer)
-    status      = Column(Integer)
+    status      = Column(Integer, nullable=False, default='0')
     
     ST_PRIVATE  = 0x1
     ST_NOFORMAT = 0x2
@@ -51,8 +71,11 @@ class LocalVideo(Base):
     video_id = Column(String, ForeignKey('videos.id'))
     
     fmt      = Column(Integer)
-    location = Column(String(4096))
-    created  = Column(DateTime)
+    location = Column(String(4096), index=True)
+    created  = Column(String)
+    status   = Column(Integer, default=0)
+    
+    ST_V2IMPORT = 0x200
     
     def __repr__(self):
         return "<Local Video: video_id='%s' location='%s'>" % (self.video_id, self.location)
@@ -78,14 +101,16 @@ class Playlist(Base):
     __tablename__ = 'playlists'
     
     id      = Column(String, primary_key=True)
-    title   = Column(String)
+    title   = Column(String, index=True)
+    items   = relationship('PlaylistItem')
     
     user_id = Column(String, ForeignKey('users.id'))
     user_name = Column(String)
-    
     url     = Column(String)
+    summary = Column(Text)
+    status  = Column(Integer, nullable=False, default='0')
     
-    items = relationship('PlaylistItem')
+    ST_NOSYNC = 0x2
     
     def __repr__(self):
         return "<YouTube Playlist: id='%s' name='%s'>" % (self.id, self.name)
@@ -96,13 +121,17 @@ class User(Base):
     __tablename__ = 'users'
     
     id      = Column(String, primary_key=True)
+    username= Column(String, index=True)
     name    = Column(String)
+    status  = Column(Integer, nullable=False, default='0')
+    
+    ST_SUSPENDED = 0x1
     
     playlists = relationship('Playlist', backref='author')
     videos  = relationship('Video', backref='author')
     
     def __repr__(self):
-        return "<YouTube User: name='%s'>" % self.name
+        return "<YouTube User: name='%s' channel='%s' status='%s'>" % (self.name, self.channel, self.status)
 
 
 class Option(Base):
@@ -127,41 +156,76 @@ class Job(Base):
     profile = Column(String(32))
     quality = Column(Integer)
     export  = Column(String(4096))
-    status  = Column(Integer)
     range   = Column(String(10))
+    status  = Column(Integer, nullable=False, default='0')
     
     ST_DISABLED = 0x1
+    ST_NODL     = 0x2
+    ST_NOSYNC   = 0x4
+    
+    ST_RUNONCE  = 0x100
+    ST_V2IMPORT = 0x200
 
 
-# DB helper functions
-def db_version_recover(db, ver=None):
+# DB migration helper
+def db_version_migrate(engine, ver=None):
     """
     Function to recover from DB_VERSION mismatches.
     
     tries to patch the db schemas to the yfdl version
     """
     if ver is None:
-        ver = int(db.getOptionValue("db_version"), 16)
+        ver = get_version(engine)
     
-    # minimalistic fallthrough-case implementation
-    fall = False
-    def case(v):
-        if fall or v == ver:
-            fall = True
-            return True
-        if v is None:
-            return True
-        return False
-    
-    # Recovery code.
-    if case(1):
+    # simple comparisons
+    if ver == DB_VERSION:
         logger.error("DB is already the latest version.")
         return
-    if case():
-        logger.error("DB has an unknown version: %x. are you sure you are using the latest yfdb?" % ver)
-        raise ValueError("unknown DB version %x" % ver)
+    if ver > DB_VERSION:
+        #logger.error("DB has an unknown version: %i. are you sure you are using the latest yfdb?" % ver)
+        raise ValueError("Database Version Unknown: %i" % ver)
+    
+    # minimalistic fallthrough-case implementation
+    class case:
+        fall=False
+        def __call__(self, v):
+            if self.fall or v == ver:
+                self.fall = True
+                return True
+            return False
+    case = case()
+    
+    # Migration code. Template:
+    #if case(_version_):
+    #   engine.execute(_modify_schema_to_match_next_version_)
+    
+    set_version(engine, DB_VERSION)
 
 
+# sqlite specific stuff
+def is_sqlite(engine):
+    return isinstance(engine.dialect, sqlalchemy.dialects.sqlite.dialect)
+
+def get_version(engine):
+    if is_sqlite(engine):
+        return engine.execute("PRAGMA user_version").fetchone()[0]
+    else:
+        if "options" in engine.dialect.table_names():
+            return int(engine.execute("SELECT value FROM options WHERE key='db_version'").fetchone()[0])
+        else:
+            return 0
+
+def set_version(engine, version):
+    if is_sqlite(engine):
+        engine.execute("PRAGMA user_version = %i" % version)
+    else:
+        if engine.execute("SELECT value FROM options WHERE key = 'db_version'").\
+                count() == 0:
+            engine.execute("INSERT INTO options (key, value) VALUES ('db_version', ?)", str(version))
+        else:
+            engine.execute("UPDATE options SET value = ? WHERE key = 'db_version'", str(version))
+
+# DB sql worker decorator
 def sqlworker(f):
     """ Auto-session-management decorator """
     @wraps(f)
@@ -185,26 +249,29 @@ class DB(object):
     
     @classmethod
     def open(cls, filename, echo=False):
+        """ Open a YFDB sqlite file """
         engine = create_engine('sqlite:///' + filename, echo=echo)
         db = cls(engine)
         db.sqlite_file = os.path.abspath(filename)
         return db
     
     def __init__(self, engine):
-        self.engine = engine
-        Base.metadata.create_all(engine)
-        self.Session = sessionmaker(bind=engine)
+        """ Initialize a YouFeed Database """
+        # version
+        ver = get_version(engine)
+        if ver == 0:
+            logger.info("Creating Schema on %s" % engine)
+            Base.metadata.create_all(engine)
+            set_version(engine, DB_VERSION)
+        elif ver != DB_VERSION:
+            logger.warn("Database Version Mismatch: db=%i this=%i. trying to migrate." %
+                    (ver, DB_VERSION))
+            db_version_migrate(engine, ver)
         
-        # check the db version
-        ver = self.getOptionValue("db_version")
-        if ver is None:
-            self.setOptionValue("db_version", "%x" % DB_VERSION)
-        else:
-            version = int(ver, 16)
-            if version != DB_VERSION:
-                logger.warn("Database Version Mismatch: database=%x yfdb=%x. trying to recover" %
-                    (version, DB_VERSION))
-                db_version_recover(self, version)
+        # setup instance
+        logger.debug("New YFDB from %s" % engine)
+        self.engine  = engine
+        self.Session = sessionmaker(bind=engine)
     
     #------------------------------
     # Users
@@ -279,7 +346,7 @@ class DB(object):
                 index = item.index + 1
         else:
             if session.query(PlaylistItem).filter(PlaylistItem.playlist_id
-                == playlist_id).filter(PlaylistItem.index == index).has():
+                == playlist_id).filter(PlaylistItem.index == index).count() != 0:
                 for record in session.query(PlaylistItem).filter(
                     PlaylistItem.playlist_id == playlist_id).filter(
                     PlaylistItem.index >= index).order_by(

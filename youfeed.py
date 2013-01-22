@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 #-------------------------------------------------------------------------------
+#- YouFeed
 #- Copyright (C) 2010-2013  Orochimarufan
 #-                 Authors: Orochimarufan <orochimarufan.x3@gmail.com>
 #-
@@ -29,10 +30,6 @@ database = "youfeed.db"
 #   number of bytes to recv at a time
 #   can be overriden in database config
 bytecount = 64*4096
-# xspf_relpath
-#   whether relative paths in XSPF playlists are enabled by default
-#   can be overridden in database config
-xspf_relpath = True
 
 
 #------------------------------------------------------------
@@ -64,8 +61,8 @@ space_replace   = "_"
 #------------------------------------------------------------
 version         = "3.0"
 version_info    = (3,0,0)
-need_libyo      = (0,9,13)
-date            = (2013,1,20)
+need_libyo      = (0,9,14)
+date            = (2013,1,21)
 
 
 #------------------------------------------------------------
@@ -85,21 +82,26 @@ import uuid
 
 # libyo
 import libyo
-from libyo.youtube.resolve import resolve3
-from libyo.youtube.url import getIdFromUrl
-from libyo.extern import argparse
-from libyo.youtube.resolve.profiles import descriptions as fmtdesc, file_extensions as fmtext, profiles
-from libyo.youtube.exception import YouTubeResolveError
-from libyo.interface.progress.simple import SimpleProgress2
-from libyo.interface.progress.file import SimpleFileProgress
-from libyo.urllib.download import download as downloadFile
-from libyo.configparser import RawPcsxConfigParser, PcsxConfigParser
-from libyo.util import choice
+try:
+    from libyo.youtube.resolve import resolve3
+    from libyo.youtube.url import getIdFromUrl
+    from libyo.extern import argparse
+    from libyo.youtube.resolve.profiles import descriptions as fmtdesc, file_extensions as fmtext, profiles
+    from libyo.youtube.exception import YouTubeResolveError
+    from libyo.interface.progress.simple import SimpleProgress2
+    from libyo.interface.progress.file import SimpleFileProgress
+    from libyo.urllib.download import download as downloadFile
+    from libyo.configparser import RawPcsxConfigParser, PcsxConfigParser
+    from libyo.util import choice
 
 # etree, urllib
-from libyo.compat import etree
-from libyo.urllib import request, parse
-from libyo.youtube.auth import urlopen
+    from libyo.compat import etree
+    from libyo.urllib import request, parse
+    from libyo.youtube.auth import urlopen
+except ImportError:
+    if libyo.version_info < need_libyo:
+        raise ImportError("Insufficent libyo version: %s found, %s required")
+    raise
 
 # yfdb
 import yfdb
@@ -120,6 +122,9 @@ _tfn_validc = (lambda c: c) if allow_invalid \
 else (lambda c: c if c in valid_filename else invalid_replace)
 tofilename = lambda s: "".join([_tfn_validc(c) for c in _tfn_spaces(s)])
 
+# put together a video filename
+gen_videofn = lambda v, f: "-".join((tofilename(v.id), uuid.uuid4().hex, str(f)))
+
 
 #------------------------------------------------------------
 # Main Code
@@ -127,12 +132,14 @@ tofilename = lambda s: "".join([_tfn_validc(c) for c in _tfn_spaces(s)])
 #------------------------------------------------------------
 def welcome():
     """ Prints the Welcome Message and checks versions """
-    print("YouFeed {1} (libyo {0})".format(libyo.version,version))
-    print("(c) 2011-2012 Orochimarufan")
+    print("YouFeed %s" % version)
+    print("(c) 2011-2013 Orochimarufan")
     if need_libyo > libyo.version_info:
         raise SystemError("libyo > {0} required.".format(".".join(map(str,need_libyo))))
     if (2,6) > sys.version_info:
         raise SystemError("python > 2.6 required.")
+    
+    logging.basicConfig(format="[%(levelname)5s] %(name)s: %(message)s", level=logging.INFO)
 
 
 def main(argv):
@@ -146,22 +153,15 @@ def main(argv):
     welcome()
     
     #---------------------------------------------
-    # database initialization
-    #---------------------------------------------
-    if not os.path.exists(database):
-        db = yfdb.DB.open(database)
-        db.setOptionValue("playlists_folder", playlists_folder)
-        db.setOptionValue("videos_folder", videos_folder)
-    else:
-        db = yfdb.DB.open(database)
-    
-    #---------------------------------------------
     # parse the commandline arguments
     #---------------------------------------------
     choice_profile = choices=choice.cichoice(profiles.keys())
     choice_quality = choice.qchoice.new(1080,720,480,360,240)
     
     parser = argparse.ArgumentParser(prog=argv[0])
+    parser.add_argument("-db", dest="database", help="The Database to use", default=database)
+    parser.add_argument("-V", dest="command_", action="store_const", const="version",
+        help="Display version and quit")
     
     subparsers = parser.add_subparsers(dest="command",
         help="Use '%(prog)s (command) -h' to get further help. By Default, the 'run' command is run.",
@@ -181,13 +181,14 @@ def main(argv):
     
     job_add = job_subparsers.add_parser("add", description="Add new job")
     job_add.add_argument("name", help="An unique Identifier for this job")
-    job_add.add_argument("type", help="The job type. choices: %(choices)s", choices=("playlist",))
+    job_add.add_argument("type", help="The job type. choices: %(choices)s", choices=("playlist", "favorites"))
     job_add.add_argument("resource", help="The job resource. [playlist -> playlist ID]")
     job_add.add_argument("-target", help="The name of the resulting playlist")
     job_add.add_argument("-profile", help="The job codec profile", choices=choice_profile)
     job_add.add_argument("-quality", help="The job maximum quality", choices=choice_quality)
     job_add.add_argument("-export", help="Export the playlist file")
     job_add.add_argument("-disable", action="store_true", help="Disable the new job")
+    job_add.add_argument("-noidcheck", action="store_true", help="Disable Playlist ID check")
     
     job_rm = job_subparsers.add_parser("rm", description="Remove a job")
     job_rm.add_argument("name", help="The job identifier")
@@ -205,8 +206,10 @@ def main(argv):
     job_mod.add_argument("-profile", help="Change the codec profile", choices=choice_profile)
     job_mod.add_argument("-quality", help="Change the maximum quality", choices=choice_quality)
     job_mod.add_argument("-export", help="Change the export location")
+    job_mod.add_argument("-noidcheck", action="store_true", help="Disable Playlist ID check")
     
     job_list = job_subparsers.add_parser("list", description="List jobs")
+    job_list.add_argument("-showall", help="Don't hide system jobs", action="store_true")
     
     job_show = job_subparsers.add_parser("show", description="Display a job")
     job_show.add_argument("name", help="The job identifier")
@@ -219,22 +222,50 @@ def main(argv):
     run_parser.add_argument("-d", help="Only check for new videos, don't download anything", action="store_true")
     run_parser.add_argument("-forceall", help="run disabled jobs, too", action="store_true")
     
+    # db subcommand
+    db_parser = subparsers.add_parser("db", description="Manage the YouFeed Database")
+    
+    db_parsers = db_parser.add_subparsers(dest="mode")
+    
+    db_import2 = db_parsers.add_parser("v2import", description="Import v2 videos")
+    db_import2.add_argument("pldir", help="youfeed v2 pl/ directory")
+    db_import2.add_argument("-move", help="move contained videos to new schema", action="store_true")
+    #db_import2.add_argument
+    
     # do the parsing
     args = parser.parse_args(argv[1:])
     
+    #---------------------------------------------
+    # database initialization
+    #---------------------------------------------
+    if not os.path.exists(args.database):
+        db = yfdb.DB.open(args.database)
+        db.setOptionValue("playlists_folder", playlists_folder)
+        db.setOptionValue("videos_folder", videos_folder)
+    else:
+        db = yfdb.DB.open(args.database)
+        
     # pass db around with args
     args.db     = db
-    args.root   = os.path.dirname(os.path.abspath(database))
+    args.root   = os.path.dirname(os.path.abspath(args.database))
     
     #---------------------------------------------
     # Dispatcher
     #---------------------------------------------
-    if args.command == "config":
+    if args.command_:
+        if args.command_ == "version":
+            print("YouFeed version: %s" % version)
+            print("libyo version:   %s" % libyo.version)
+            print("DB version:      %i" % yfdb.DB_VERSION)
+            return 0
+    elif args.command == "config":
         return config_command(args)
     elif args.command == "job":
         return job_command(args)
     elif args.command == "run":
         return run_command(args)
+    elif args.command == "db":
+        return db_command(args)
 
 
 def config_command(args):
@@ -249,34 +280,77 @@ def config_command(args):
         if not args.value:
             raise argparse.ArgumentError("value", "Value required for mode 'set'")
         if args.key in ("db_version",):
-            raise argparse.ArgumentError("key", "Key '%s' cannot be modified" % args.key)
+            # db_version might be used in non-sqlite environments
+            raise argparse.ArgumentError("key", "Key '%s' is reserved" % args.key)
         args.db.setOptionValue(args.key, args.value)
         print("'%s' is now '%s'" % (args.key, args.db.getOptionValue(args.key)))
     elif args.mode == "list":
-        for opt in args.db.Session().query(yfdb.Option).all():
+        for opt in args.db.Session().query(yfdb.Option).\
+                filter(~yfdb.Option.key.in_('db_version',)).all():
             print("'%s'='%s'" % (opt.key, opt.value))
+
+
+def db_command(args):
+    """ the db subcommand """
+    if args.mode == "v2import":
+        v2import_command(args)
 
 
 def job_command(args):
     """ the job command allows users to create and modify jobs """
     session = args.db.Session()
     
+    # fav job
+    def make_fav_pi():
+        user = session.query(yfdb.User).filter(yfdb.User.username == args.resource.lower()).first()
+        
+        if not user:
+            userdoc = gdata("users/%s" % args.resource)
+            userid = userdoc.find(tag("yt", "userId")).text
+            user = session.query(yfdb.User).get(userid)
+            if not user:
+                username = userdoc.find(tag("yt", "username"))
+                username1 = username.text
+                username2 = username.attrib['display']
+                user = yfdb.User(id=userid, username=username1, name=username2)
+                session.add(user)
+        
+        return "FL%s" % user.id
+    
+    def make_job_tr():
+        if args.type == "favorites":
+            return "playlist", make_fav_pi()
+        else:
+            if not args.noidcheck and args.resource[:2] not in ("PL", "FL"):
+                print("[ERROR] playlist id not prefixed with either [PL] or [FL], please double-check your playlist ID and make sure you used the whole id (&list=<id>&) Normal playlists have the [PL] prefix. will stop now. use -noidcheck to ignore")
+                return None, None
+            return args.type, args.resource
+    
+    # add unique stuff
     if args.mode == "add":
-        job = yfdb.Job(name=args.name, type=args.type)
-        pl = get_playlist_id(args.type, args.resource)
-        args.db.addPlaylistEx(pl, session=session)
-        job.playlist_id = pl
-        job.status = 0
+        tp, pl = make_job_tr()
+        job = yfdb.Job(name=args.name, type=tp, playlist_id=pl)
+        
         if args.disable:
             job.status = job.ST_DISABLED
+        
         session.add(job)
         print("Job '%s' was created%s" % (job.name, " (disabled)" if args.disable else ""))
     
+    # list
     elif args.mode == "list":
-        for job in session.query(yfdb.Job).all():
-            print("Job '%s': %s('%s')%s" % (
-                job.name, job.type, job.playlist_id,
-                " (disabled)" if job.status & job.ST_DISABLED else ""))
+        q = session.query(yfdb.Job)
+        if not args.showall:
+            q = q.filter(~yfdb.Job.name.startswith("v2import_"))
+        
+        jobs = q.all()
+        if jobs:
+            for job in jobs:
+                print("Job '%s'%s" % (job.name,
+                    #job.type, job.playlist_id,
+                    " (disabled)" if job.status & job.ST_DISABLED else ""))
+        else:
+            print("No jobs.")
     
     else:
         # all other operation modify an existing Job
@@ -311,20 +385,31 @@ def job_command(args):
             if job.export is not None:
                 print("Export to: '%s'" % job.export)
             
+            # stringify the flags
             flags = list()
             if job.status & job.ST_DISABLED:
                 flags.append("disabled")
-            print("Flags: {0:b}{1:s}".format(job.status, "(" + ", ".join(flags) + ")" if flags else ""))
+            if job.status & job.ST_NODL:
+                flags.append("nodl")
+            if job.status & job.ST_NOSYNC:
+                flags.append("nosync")
+            if job.status & job.ST_RUNONCE:
+                flags.append("once")
+            if job.status & job.ST_V2IMPORT:
+                flags.append("v2")
+            
+            print("Flags: {0:b}{1:s}".format(job.status, " (" + ", ".join(flags) + ")" if flags else ""))
         
+        # change unique stuff
         elif args.mode == "change":
             if args.newname:
                 job.name = args.newname
             if args.type:
-                job.type = args.type
-            if args.resource:
-                pl = get_playlist_id(job.type, args.resource)
-                args.db.addPlaylistEx(pl, session=session)
-                job.playlist_id = pl
+                if not args.resource:
+                    raise argparse.ArgumentError("resource", "resource required if type is changed")
+                job.type, job.playlist_id = make_job_tr()
+            elif args.resource:
+                job.playlist_id = args.resource
             print("Job '%s' was modified. % job.name")
     
     #common modify/add operations
@@ -334,7 +419,7 @@ def job_command(args):
         if args.profile:
             job.profile = args.profile
         if args.quality:
-            job.quality = 360#TODO get quality integer
+            job.quality = choice.qchoice.unify(args.quality)
         if args.export:
             job.export = args.export
     
@@ -348,11 +433,6 @@ def run_command(args):
     collects jobs and calls run_job for each of them
     """
     session = args.db.Session()
-    
-    if not os.path.exists(args.db.getOptionValue("videos_folder")):
-        os.makedirs(args.db.getOptionValue("videos_folder"))
-    if not os.path.exists(args.db.getOptionValue("playlists_folder")):
-        os.makedirs(args.db.getOptionValue("playlists_folder"))
     
     if args.names:
         joblist = list()
@@ -376,28 +456,49 @@ def run_command(args):
 
 def run_job(args, session, job):
     """
-    Gets the remote playlist and run_video()s each video
-    The run_playlist()s the Playlist
+    process a job
     """
-    type, res = job.type, get_resource(job.type, job.playlist_id)
-    
     print("[ RUN ] Job: %s" % job.name)
     
-    if type == "playlist":
+    if job.status & yfdb.Job.ST_NOSYNC == 0:
+        playlist = run_sync(args, session, job)
+    else:
+        playlist = session.query(yfdb.Playlist).get(job.playlist_id)
+        if not playlist:
+            print("[ERROR]: playlist not initialized, but sync turned off")
+            return 1
+    
+    # do the job (haha)
+    vids = run_playlist(args, session, job, playlist)
+    run_mkplaylist(args, session, job, playlist, vids)
+    
+    # runonce
+    if job.status & yfdb.Job.ST_RUNONCE != 0:
+        job.status |= yfdb.Job.ST_DISABLED
+    
+    return 0
+    
+def run_sync(args, session, job):
+    """
+    Gets the remote playlist
+    """
+    if job.type == "playlist":
         # get the remote playlist
-        doc = gdata("playlists/" + res, {"max-results":"50"}).getroot()
+        doc = gdata("playlists/" + job.playlist_id, {"max-results":"50"}).getroot()
         
     # playlist metadata
     author = doc.find(tag("atom", "author"))
     title  = doc.find(tag("atom", "title")).text
     
-    playlist        = args.db.getPlaylist(job.playlist_id, session=session)
+    playlist        = session.query(yfdb.Playlist).get(job.playlist_id)
+    if playlist is None:
+        playlist    = yfdb.Playlist(id=job.playlist_id)
+        session.add(playlist)
+    
     playlist.title  = title
     playlist.user_name = author.find(tag("atom", "name")).text
     if author.find(tag("yt", "userId")) is not None:
-        playlist.author = args.db.addUserEx(author.find(tag("yt", "userId")).text,
-                                            author.find(tag("atom", "name")).text,
-                                            session=session)
+        playlist.author = get_make_user(author.find(tag("yt", "userId")).text, session)
     #playlist.url    = doc.find("%s[rel='alternate']" % tag("atom", "link")).text
     
     print("[ RUN ] Playlist: '%s' by %s" % (playlist.title, playlist.user_name))
@@ -408,39 +509,50 @@ def run_job(args, session, job):
             data     = entry.find(tag("media", "group"))
             
             video_id = data.find(tag("yt", "videoid")).text
-            video    = args.db.getVideo(video_id)
+            video    = session.query(yfdb.Video).get(video_id)
             
             if video is None:
-                # get the metadata
-                title       = data.find(tag("media", "title")).text
-                description = data.find(tag("media", "description")).text
-                keywords    = data.find(tag("media", "keywords")).text
-                categories  = ",".join([i.attrib["label"]
-                        for i in data.iterfind(tag("media", "category"))])
-                thumbnails  = json.dumps([
-                        (i.attrib["width"], i.attrib["height"],
-                         i.attrib.get("time", "0"), i.attrib["url"])
-                        for i in data.iterfind(tag("media", "thumbnail"))])
-                author_id   = data.find(tag("yt", "uploaderId")).text[2:]
-                uploaded    = isodate_parse_datetime(data.find(tag("yt", "uploaded")).text)
-                duration    = int(data.find(tag("yt", "duration")).attrib["seconds"])
-                
                 # create the video
-                video = yfdb.Video(id=video_id, title=title, description=description,
-                                   keywords=keywords, categories=categories,
-                                   thumbnails=thumbnails, uploaded=uploaded,
-                                   status=0, duration=duration)
+                video = yfdb.Video(id=video_id)
                 session.add(video)
                 
-                # do the user
-                user = session.query(yfdb.User).get(author_id)
-                if user is None:
-                    userdoc = gdata("users/%s" % author_id)
-                    username = userdoc.find(tag("atom", "title")).text
-                    user = yfdb.User(id=author_id, name=username)
-                    session.add(user)
-                video.author = user
+                # link the user
+                user_id = data.find(tag("yt", "uploaderId")).text[2:]
+                author = get_make_user(user_id, session)
+                if author.status & yfdb.User.ST_SUSPENDED != 0:
+                    author_ = data.find("%s[@role='uploader']" % tag("media", "credit"))
+                    author.name = author_.attrib[tag("yt", "display")]
+                    author.username = author_.text
+                video.author = author
             
+            #print(str(etree.tostring(data, pretty_print=True),"utf8"))
+            
+            # update the metadata
+            video.title       = data.find(tag("media", "title")).text
+            try:
+                video.description = data.find(tag("media", "description")).text
+            except AttributeError: pass
+            try:
+                video.keywords    = data.find(tag("media", "keywords")).text
+            except AttributeError: pass
+            try:
+                video.categories  = ",".join([i.attrib["label"]
+                    for i in data.iterfind(tag("media", "category"))])
+            except (AttributeError, KeyError): pass
+            try:
+                video.thumbnails  = json.dumps([
+                    (i.attrib["width"], i.attrib["height"],
+                     i.attrib.get("time", "0"), i.attrib["url"])
+                    for i in data.iterfind(tag("media", "thumbnail"))])
+            except AttributeError: pass
+            try:
+                video.uploaded    = data.find(tag("yt", "uploaded")).text
+            except AttributeError: pass
+            try:
+                video.duration    = int(data.find(tag("yt", "duration")).attrib["seconds"])
+            except AttributeError: pass
+            
+            # create the playlist item
             try:
                 session.query(yfdb.PlaylistItem).\
                     filter(yfdb.PlaylistItem.playlist_id == job.playlist_id).\
@@ -450,18 +562,17 @@ def run_job(args, session, job):
                 index = int(ix.text) if ix is not None else None
                 args.db.addPlaylistVideo(job.playlist_id, video.id, index, session=session)
         
+        # get next set of videos ( if any )
         next = doc.find("%s[@rel='next']" % tag("atom", "link"))
         if next is not None:
             doc = gdata_link(next.attrib["href"]).getroot()
         else:
             break
     
+    # commit database
     session.commit()
     
-    # do the job (haha)
-    vids = run_playlist(args, session, job, playlist)
-    run_mkplaylist(args, session, job, playlist, vids)
-    return 0
+    return playlist
 
 
 def run_playlist(args, session, job, playlist):
@@ -518,6 +629,9 @@ def run_video(args, session, job, video, lookup_table):
     # -p only checks videos that we already have
     if args.p: return
     
+    # ST_NODL prevents downloads
+    if job.status & yfdb.Job.ST_NODL != 0: return
+    
     # get it from youtube
     print("[VIDEO] New video: '%s' by %s" % (video.title, video.author.name))
     
@@ -552,8 +666,10 @@ def run_video(args, session, job, video, lookup_table):
 
 def run_download(args, session, video, url, fmt):
     """ actually download a video """
+    make_dirs_to(args, "videos_folder")
+    
     folder      = args.db.getOptionValue("videos_folder")
-    basename    = tofilename("-".join((video.id, uuid.uuid4().hex)))
+    basename    = gen_videofn(video, fmt)
     filename    = ".".join((basename, fmtext[fmt]))
     path        = os.path.join(folder, filename)
     fullpath    = make_absolute(path, args.root)
@@ -575,7 +691,7 @@ def run_download(args, session, video, url, fmt):
     
     # Save DB
     localvideo = yfdb.LocalVideo(video_id=video.id, fmt=fmt, location=path,
-                                 created=datetime.datetime.utcnow())
+                                 created=datetime.datetime.utcnow().isoformat())
     session.add(localvideo)
     session.commit()
     
@@ -584,6 +700,8 @@ def run_download(args, session, video, url, fmt):
 
 def run_mkplaylist(args, session, job, playlist_, vids):
     """ creates the local playlist """
+    make_dirs_to(args, "playlists_folder")
+    
     # sort out missing videos
     vids = [vid for vid in vids if vid is not None]
     
@@ -593,12 +711,6 @@ def run_mkplaylist(args, session, job, playlist_, vids):
         target = job.target
     else:
         target = playlist_.title
-    
-    rel = args.db.getOptionValue("xspf_relpath")
-    if rel is None:
-        rel = xspf_relpath
-    else:
-        rel = rel in ("true", "yes", "True")
     
     # get the playlist localtion
     folder      = args.db.getOptionValue("playlists_folder")
@@ -626,6 +738,7 @@ def run_mkplaylist(args, session, job, playlist_, vids):
         
         TextElement(track, "location", "file://" + video.location)
         TextElement(track, "location", "file://" + make_absolute(video.location, args.root))
+        TextElement(track, "identifier", "http://youtube.com/watch?v=%s" % video.video_id)
         TextElement(track, "title", video.video.title)
         TextElement(track, "creator", video.video.author.name)
         TextElement(track, "annotation", video.video.description)
@@ -671,7 +784,7 @@ def make_job_qa(args, job):
             quality = int(choice.qchoice.unify(quality))
     
     # generate the lookup table
-    if quality not in profile:
+    if quality not in profile[0]:
        print("[ WARN] The Exact Quality (%i) is not avaiable in this Profile: \"%s\"" % (quality, profile_name))
     return [v for k, v in profile[0].items() if k <= quality]
 
@@ -693,6 +806,7 @@ xmlns = {
     "atom": "http://www.w3.org/2005/Atom",
     "openSearch": "http://a9.com/-/spec/opensearch/1.1/",
     "yt": "http://gdata.youtube.com/schemas/2007",
+    "gd": "http://schemas.google.com/g/2005",
     "media": "http://search.yahoo.com/mrss/",
     "xspf": "http://xspf.org/ns/0/",
     "xml":  "http://www.w3.org/XML/1998/namespace",
@@ -713,8 +827,15 @@ def gdata_link(url, raw=False):
     req.add_header("GData-Version", "2")
     
     if not raw:
-        with urlopen(req) as fp:
-            return etree.parse(fp)
+        try:
+            with urlopen(req) as fp:
+                return etree.parse(fp)
+        except request.HTTPError as e:
+            tree = etree.parse(e.fp)
+            el = etree.SubElement(tree.getroot(), "httpcode")
+            el.text = str(e.getcode())
+            e.fp.close()
+            return tree
     else:
         return urlopen(req)
 
@@ -722,20 +843,22 @@ def tag(xmlns_, tagname):
     return "".join(('{', xmlns[xmlns_], '}', tagname))
 
 
-# playlist_id helpers
-def get_playlist_id(type, resource):
-    """ helper that returns the playlist_id to use in the DB """
-    if type == "playlist":
-        return resource
-    elif type == "favorites":
-        return "yf_favorites:%s" % resource
-
-def get_resource(type, playlist_id):
-    """ helper to get the resource from the playlist id """
-    if type == "playlist":
-        return playlist_id
-    elif type == "favorites":
-        return playlist_id[:13]
+def get_make_user(user_id, session):
+    """ get or create an user """
+    user = session.query(yfdb.User).get(user_id)
+    if user is None:
+        userdoc = gdata("users/%s" % user_id)
+        #print(str(etree.tostring(userdoc, pretty_print=True), "utf8"))
+        if userdoc.getroot().tag == tag("gd", "errors"):
+            user = yfdb.User(id=user_id, name="SUSPENDED USER", status=yfdb.User.ST_SUSPENDED)
+            session.add(user)
+        else:
+            username = userdoc.find(tag("yt", "username"))
+            username1 = username.text
+            username2 = username.attrib["display"]
+            user = yfdb.User(id=user_id, username=username1, name=username2, status=0)
+            session.add(user)
+    return user
 
 
 # some path stuff
@@ -745,6 +868,135 @@ def make_absolute(path, root=None):
             root = os.getcwd()
         path = os.path.join(root, path)
     return os.path.normpath(path)
+
+def make_dirs_to(args, key):
+    path = make_absolute(args.db.getOptionValue(key), args.root)
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+#------------------------------------------------------------
+# v2 compatibility stuff
+#------------------------------------------------------------
+def v2import_command(args):
+    """ import v2 pl/ dir """
+    session = args.db.Session()
+    folder = os.path.abspath(args.pldir)
+    parent = folder.rsplit(os.path.sep, 1)[0]
+    
+    print("[  DB ]Starting Import in: %s" % parent)
+    os.chdir(parent)
+    
+    nPl = 0
+    nVi = 0
+    
+    for f in os.listdir(folder):
+        if f.endswith(".plm"):
+            nPl += 1
+            with open(os.path.join(folder, f)) as fp:
+                meta = json.load(fp)
+            
+            import pprint
+            #pprint.pprint(meta["meta"])
+            
+            try:
+                playlist_id =  meta["meta"]["playlist_id"]
+            except KeyError:
+                playlist_id = f[:-4]
+            
+            # Standard playlists are prefixed [PL]
+            if not playlist_id.startswith("PL"):
+                playlist_id = "PL" + playlist_id
+            
+            author_name = meta["meta"]["author"]
+            playlist_ti = meta["meta"]["name"]
+            playlist_su = meta["meta"]["description"]
+            
+            print("Playlist: %s (%s)" % (playlist_ti, playlist_id))
+            
+            playlist = yfdb.Playlist(id=playlist_id, user_name=author_name,
+                title=playlist_ti, summary=playlist_su)
+            
+            session.add(playlist)
+            
+            for item in meta["local"]:
+                vid2 = session.query(yfdb.Video).get(item["id"])
+                if vid2:
+                    print("[ WARN] Dup Video (%s): '%s' and '%s', skipping 2nd" %
+                        (item["id"], vid2.title, item["title"]))
+                    continue
+                
+                nVi += 1
+                
+                vid = yfdb.Video(id=item["id"], title=item["title"],
+                   categories=item["category"], description=item["description"],
+                   keywords=",".join(item.get("tags",list())), uploaded=item["uploaded"],
+                   thumbnails=json.dumps((
+                       (0, 0, "", item["thumbnail"]["sqDefault"]),
+                       (0, 0, "", item["thumbnail"]["hqDefault"]))),
+                    duration=item["duration"])
+                
+                usr = item["uploader"]
+                
+                user = session.query(yfdb.User).\
+                    filter(yfdb.User.username == usr.lower()).first()
+        
+                if not user:
+                    userdoc = gdata("users/%s" % usr)
+                    if userdoc.getroot().tag == tag("gd", "errors"):
+                        user = None
+                    else:
+                        userid = userdoc.find(tag("yt", "userId")).text
+                        user = session.query(yfdb.User).get(userid)
+                        if not user:
+                            username = userdoc.find(tag("yt", "username"))
+                            username1 = username.text
+                            username2 = username.attrib['display']
+                            user = yfdb.User(id=userid, username=username1,
+                                name=username2)
+                            session.add(user)
+                
+                vid.author = user
+            
+            for video_id, dl in meta["downloads"].items():
+                path = os.path.abspath(dl["path"])
+                
+                if not os.path.exists(path):
+                    print("[ERROR] '%s' does not exist" % path)
+                    continue
+                
+                if args.move:
+                    video = session.query(yfdb.User).get(video_id)
+                    newfile = gen_videofn(video, dl["fmt"])
+                    newfile2 = newfile + "." + dl["type"]
+                    newpath = make_absolute(args.db.getOptionValue("videos_dir"),
+                        args.root)
+                    newfull = os.path.join(newpath, newfile2)
+                    
+                    shutil.move(path, newfull)
+                    
+                    path = newfull
+                
+                path = os.path.relpath(path, args.root)
+                
+                loc = yfdb.LocalVideo(video_id=video_id, location=path,
+                    created=datetime.datetime.utcnow().isoformat(),
+                    fmt=dl["fmt"], status=yfdb.LocalVideo.ST_V2IMPORT)
+                
+                session.add(loc)
+            
+            safe = tofilename(playlist_ti)
+            
+            job = yfdb.Job(type="playlist", playlist_id=playlist_id,
+                name="v2import_%s_%s" % (safe, playlist_id),
+                target="%s_(v2import)" % safe,
+                status=yfdb.Job.ST_NODL|yfdb.Job.ST_RUNONCE|yfdb.Job.ST_V2IMPORT)
+            
+            session.add(job)
+    
+    print("[  DB ] Import Done: Imported %i Playlists, %i Videos" % (nPl, nVi))
+    session.commit()
+
 
 #------------------------------------------------------------
 # ISO8601 DateTime parser
