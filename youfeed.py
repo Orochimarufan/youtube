@@ -29,7 +29,7 @@ database = "youfeed.db"
 # bytecount
 #   number of bytes to recv at a time
 #   can be overriden in database config
-bytecount = 64*4096
+bytecount = 64 * 4096
 
 
 #------------------------------------------------------------
@@ -60,9 +60,9 @@ space_replace   = "_"
 #   the version number
 #------------------------------------------------------------
 version         = "3.0"
-version_info    = (3,0,0)
-need_libyo      = (0,9,14)
-date            = (2013,1,21)
+version_info    = (3, 0, 0)
+need_libyo      = (0, 10, 0)
+date            = (2013, 1, 23)
 
 
 #------------------------------------------------------------
@@ -75,23 +75,19 @@ import os
 import json
 import string
 import platform
-import re
 import datetime
-import decimal
 import uuid
+import shutil
 
 # libyo
 import libyo
 try:
     from libyo.youtube.resolve import resolve3
-    from libyo.youtube.url import getIdFromUrl
     from libyo.extern import argparse
     from libyo.youtube.resolve.profiles import descriptions as fmtdesc, file_extensions as fmtext, profiles
     from libyo.youtube.exception import YouTubeResolveError
-    from libyo.interface.progress.simple import SimpleProgress2
     from libyo.interface.progress.file import SimpleFileProgress
     from libyo.urllib.download import download as downloadFile
-    from libyo.configparser import RawPcsxConfigParser, PcsxConfigParser
     from libyo.util import choice
 
 # etree, urllib
@@ -110,14 +106,14 @@ import yfdb
 #------------------------------------------------------------
 # Platform and Filename helper code
 #------------------------------------------------------------
-if platform.system()=="cli": #IronPython OS Detection
-    WINSX = platform.win32_ver()[0]!=""
+if platform.system() == "cli": #IronPython OS Detection
+    WINSX = platform.win32_ver()[0] != ""
 else:
-    WINSX = platform.system()=="Windows"
+    WINSX = platform.system() == "Windows"
 
 valid_filename = valid_filename.format(**string.__dict__)
 _tfn_spaces = (lambda s: s) if allow_spaces \
-else (lambda s: s.replace(" ","_"))
+else (lambda s: s.replace(" ", "_"))
 _tfn_validc = (lambda c: c) if allow_invalid \
 else (lambda c: c if c in valid_filename else invalid_replace)
 tofilename = lambda s: "".join([_tfn_validc(c) for c in _tfn_spaces(s)])
@@ -135,8 +131,8 @@ def welcome():
     print("YouFeed %s" % version)
     print("(c) 2011-2013 Orochimarufan")
     if need_libyo > libyo.version_info:
-        raise SystemError("libyo > {0} required.".format(".".join(map(str,need_libyo))))
-    if (2,6) > sys.version_info:
+        raise SystemError("libyo > {0} required.".format(".".join(map(str, need_libyo))))
+    if (2, 6) > sys.version_info:
         raise SystemError("python > 2.6 required.")
     
     logging.basicConfig(format="[%(levelname)5s] %(name)s: %(message)s", level=logging.INFO)
@@ -155,8 +151,8 @@ def main(argv):
     #---------------------------------------------
     # parse the commandline arguments
     #---------------------------------------------
-    choice_profile = choices=choice.cichoice(profiles.keys())
-    choice_quality = choice.qchoice.new(1080,720,480,360,240)
+    choice_profile = choice.cichoice(profiles.keys())
+    choice_quality = choice.qchoice.new(1080, 720, 480, 360, 240)
     
     parser = argparse.ArgumentParser(prog=argv[0])
     parser.add_argument("-db", dest="database", help="The Database to use", default=database)
@@ -477,14 +473,15 @@ def run_job(args, session, job):
         job.status |= yfdb.Job.ST_DISABLED
     
     return 0
-    
+
+
 def run_sync(args, session, job):
     """
     Gets the remote playlist
     """
     if job.type == "playlist":
         # get the remote playlist
-        doc = gdata("playlists/" + job.playlist_id, {"max-results":"50"}).getroot()
+        doc = gdata("playlists/" + job.playlist_id, {"max-results": "50"}).getroot()
         
     # playlist metadata
     author = doc.find(tag("atom", "author"))
@@ -563,9 +560,9 @@ def run_sync(args, session, job):
                 args.db.addPlaylistVideo(job.playlist_id, video.id, index, session=session)
         
         # get next set of videos ( if any )
-        next = doc.find("%s[@rel='next']" % tag("atom", "link"))
-        if next is not None:
-            doc = gdata_link(next.attrib["href"]).getroot()
+        nextpage = doc.find("%s[@rel='next']" % tag("atom", "link"))
+        if nextpage is not None:
+            doc = gdata_link(nextpage.attrib["href"]).getroot()
         else:
             break
     
@@ -785,7 +782,7 @@ def make_job_qa(args, job):
     
     # generate the lookup table
     if quality not in profile[0]:
-       print("[ WARN] The Exact Quality (%i) is not avaiable in this Profile: \"%s\"" % (quality, profile_name))
+        print("[ WARN] The Exact Quality (%i) is not avaiable in this Profile: \"%s\"" % (quality, profile_name))
     return [v for k, v in profile[0].items() if k <= quality]
 
 
@@ -795,7 +792,7 @@ def recursive_resolve(video_id, lookup_table):
         if i in umap:
             return umap[i], i
     else:
-        return None,None
+        return None, None
 
 
 #------------------------------------------------------------
@@ -809,8 +806,9 @@ xmlns = {
     "gd": "http://schemas.google.com/g/2005",
     "media": "http://search.yahoo.com/mrss/",
     "xspf": "http://xspf.org/ns/0/",
-    "xml":  "http://www.w3.org/XML/1998/namespace",
+    "xml": "http://www.w3.org/XML/1998/namespace",
     }
+
 
 def gdata(module, params=dict(), ssl=True, raw=False):
     url = parse.urlunparse(("https" if ssl else "http",
@@ -821,6 +819,7 @@ def gdata(module, params=dict(), ssl=True, raw=False):
                             ""))
     
     return gdata_link(url, raw)
+
 
 def gdata_link(url, raw=False):
     req = request.Request(url)
@@ -838,6 +837,7 @@ def gdata_link(url, raw=False):
             return tree
     else:
         return urlopen(req)
+
 
 def tag(xmlns_, tagname):
     return "".join(('{', xmlns[xmlns_], '}', tagname))
@@ -869,6 +869,7 @@ def make_absolute(path, root=None):
         path = os.path.join(root, path)
     return os.path.normpath(path)
 
+
 def make_dirs_to(args, key):
     path = make_absolute(args.db.getOptionValue(key), args.root)
     if not os.path.exists(path):
@@ -896,11 +897,11 @@ def v2import_command(args):
             with open(os.path.join(folder, f)) as fp:
                 meta = json.load(fp)
             
-            import pprint
+            #import pprint
             #pprint.pprint(meta["meta"])
             
             try:
-                playlist_id =  meta["meta"]["playlist_id"]
+                playlist_id = meta["meta"]["playlist_id"]
             except KeyError:
                 playlist_id = f[:-4]
             
@@ -930,7 +931,7 @@ def v2import_command(args):
                 
                 vid = yfdb.Video(id=item["id"], title=item["title"],
                    categories=item["category"], description=item["description"],
-                   keywords=",".join(item.get("tags",list())), uploaded=item["uploaded"],
+                   keywords=",".join(item.get("tags", list())), uploaded=item["uploaded"],
                    thumbnails=json.dumps((
                        (0, 0, "", item["thumbnail"]["sqDefault"]),
                        (0, 0, "", item["thumbnail"]["hqDefault"]))),
@@ -990,7 +991,7 @@ def v2import_command(args):
             job = yfdb.Job(type="playlist", playlist_id=playlist_id,
                 name="v2import_%s_%s" % (safe, playlist_id),
                 target="%s_(v2import)" % safe,
-                status=yfdb.Job.ST_NODL|yfdb.Job.ST_RUNONCE|yfdb.Job.ST_V2IMPORT)
+                status=yfdb.Job.ST_NODL | yfdb.Job.ST_RUNONCE | yfdb.Job.ST_V2IMPORT)
             
             session.add(job)
     
@@ -999,157 +1000,7 @@ def v2import_command(args):
 
 
 #------------------------------------------------------------
-# ISO8601 DateTime parser
-#------------------------------------------------------------
-isodate_date = (r"(?:"
-                r"(?:(?P<sign>[+-])(?P<year5>[0-9]{5,}[0-9]+)|(?P<year>[0-9]{4}))"
-                r"(?:(?P<datesep>-?)(?:"
-                 # y-m-d
-                 r"(?P<month>[0-9]{2})"
-                 r"(?:(?P=datesep)(?P<day>[0-9]{2}))?"
-                r"|"
-                 # y-w-d
-                 r"W(?P<week>[0-9]{2})"
-                 r"(?:(?P=datesep)(?P<weekday>[0-7]))?"
-                r"|"
-                 # y-d
-                 r"(?P<ordinal>[0-9]{3})"
-                r"))?|"
-                # century
-                r"(?:(?P<centsign>[+-])(?P<cent3>[0-9]{3,4})|(?P<century>[0-9]{2}))"
-               r")")
-isodate_time = (r"(?P<hour>[0-9]{2})"
-                r"(?:(?P<timesep>:?)(?P<minute>[0-9]{2})"
-                r"(?:(?P=timesep)(?P<second>[0-9]{2})))"
-                r"(?:[,.](?P<fraction>[0-9]+))?")
-isodate_tz   = r"(?P<tz>(?:Z|(?P<tzsign>[+-])(?P<tzhour>[0-9]{2})(?::?(?P<tzmin>[0-9]{2}))?)?)"
-isodate_tre  = re.compile(isodate_time + isodate_tz)
-isodate_dre  = re.compile(isodate_date)
-isodate_re   = re.compile(isodate_date + "T" + isodate_time + isodate_tz)
-isodate_zero = datetime.timedelta(0)
-
-class isodate_tzinfo(datetime.tzinfo):
-    def __init__(self, offset_hours=0, offset_mins=0, name='UTC'):
-        self.__offset = datetime.timedelta(hours=offset_hours, minutes=offset_mins)
-        self.__name = name
-    def utcoffset(self, dt):
-        return self.__offset
-    def tzname(self, dt):
-        return self.__name
-    def dst(self, dt):
-        return isodate_zero
-    def __repr__(self):
-        return '<ISO8601 TZInfo %r>' % self.__name
-
-isodate_utc = isodate_tzinfo()
-
-def isodate_parse_datetime(s):
-    """ parses a ISO8601 DateTime """
-    match = isodate_re.match(s)
-    if not match:
-        raise ValueError("not a valid ISO8601 DateTime: '%s'" % s)
-    groups = match.groupdict()
-    
-    return datetime.datetime.combine(isodate_pd(groups), isodate_pt(groups))
-
-def isodate_parse_date(s):
-    """ parses a ISO8601 Date """
-    match = isodate_dre.match(s)
-    if not match:
-        raise ValueError("not a valid ISO8601 Date: '%s'" % s)
-    
-    return isodate_pd(match.groupdict())
-
-def isodate_parse_time(s):
-    """ parses a ISO8601 Time """
-    match = isodate_tre.match(s)
-    if not match:
-        raise ValueError("not a valid ISO8601 Time: '%s'" % s)
-    
-    return isodate_pt(match.groupdict())
-
-def isodate_pd(groups):
-    """ Extracts the date from regexp results """
-    # century date
-    has = lambda k: k in groups and groups[k] is not None
-    if has('cent3'):
-        sign = -1 if groups['centsign'] == "-" else 1
-        date = datetime.date(sign * (int(groups['century']) * 100 + 1), 1, 1)
-    elif has('century'):
-        date = datetime.date(int(groups['century']) * 100, 1, 1)
-    
-    else:
-        # year
-        if has('year5'):
-            year = int(groups['year5']) * -1 if groups['sign'] == "-" else 1
-        else:
-            year = int(groups['year'])
-        
-        # y-m-*
-        if has('month'):
-            if has('day'):
-                date = datetime.date(year, int(groups['month']), int(groups['day']))
-            else:
-                date = datetime.date(year, int(groups['month']), 1)
-        
-        else:
-            date = datetime.date(year, 1, 1)
-            
-            # y-w-d
-            if has('week'):
-                iso = date.isocalendar()
-                
-                date += datetime.timedelta(
-                    weeks=int(groups['week']) - (1 if iso[1] == 1 else 0),
-                    days=-iso[2] + (int(groups['weekday']) if has('weekday') else 1))
-            
-            # y-d
-            elif has('ordinal'):
-                date += datetime.timedelta(days=int(groups['ordinal'])-1)
-    
-    return date
-
-def isodate_pt(groups):
-    """ Extracts the time from regexp results """
-    has = lambda k: k in groups and groups[k] is not None
-    get = lambda k, d: groups[k] if has(k) else d
-    
-    # TZInfo
-    if not groups['tz']:
-        tz = None
-    elif groups['tz'] == 'Z':
-        tz = isodate_utc
-    else:
-        sign = -1 if groups['tzsign'] == '-' else 1
-        tz = isodate_tzinfo(sign * int(get('tzhour', 0)),
-                            sign * int(get('tzmin', 0)),
-                            groups['tz'])
-    
-    # Time
-    if has('fraction'):
-        fraction = decimal.Decimal('0.' + groups['fraction'])
-    else:
-        fraction = 0
-    
-    if has('second'):
-        time = datetime.time(int(groups['hour']), int(groups['minute']), int(groups['second']),
-            (fraction.quantize(decimal.Decimal('.000001')) * int(1e6)).to_integral(), tz)
-    elif has('minute'):
-        second = fraction * 60
-        time = datetime.time(int(groups['hour']), int(groups['minute']), int(second),
-            ((second - int(second)).quantize(decimal.Decimal('0.000001')) * int(1e6)).to_integral(), tz)
-    else:
-        minute = fraction * 60
-        second = (minute - int(minute)) * 60
-        time = datetime.time(int(groups['hour']), int(minute), int(second),
-            ((second - int(second)).quantize(decimal.Decimal('0.000001')) * int(1e6)).to_integral(), tz)
-    
-    return time
-
-
-#------------------------------------------------------------
 # Python entrypoint
 #------------------------------------------------------------
-if __name__=="__main__":
+if __name__ == "__main__":
     sys.exit(main(sys.argv))
-
