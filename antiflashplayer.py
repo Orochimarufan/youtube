@@ -50,7 +50,7 @@ from libyo.util.choice import cichoice, qchoice, switchchoice
 from libyo.util.util import listreplace_s as lreplace
 from libyo.util.pretty import fillA, fillP
 from libyo.argparse import ArgumentParser, RawTextHelpFormatter, LibyoArgumentParser
-input = compat.getModule("util").input; #@ReservedAssignment
+from libyo.compat.bltin import input
 
 import tempfile
 import shlex

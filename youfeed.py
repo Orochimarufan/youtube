@@ -125,7 +125,6 @@ tofilename = lambda s: "".join([_tfn_validc(c) for c in _tfn_spaces(s)])
 # put together a video filename
 gen_videofn = lambda v, f: "-".join((tofilename(v.id), uuid.uuid4().hex, str(f)))
 
-
 #------------------------------------------------------------
 # Main Code
 #   see the docstrings for more info
@@ -224,13 +223,25 @@ def main(argv):
     
     # db subcommand
     db_parser = subparsers.add_parser("db", description="Manage the YouFeed Database")
-    
     db_parsers = db_parser.add_subparsers(dest="mode")
     
     db_import2 = db_parsers.add_parser("v2import", description="Import v2 videos")
     db_import2.add_argument("pldir", help="youfeed v2 pl/ directory")
     db_import2.add_argument("-move", help="move contained videos to new schema", action="store_true")
     #db_import2.add_argument
+    
+    # export subcommand
+    export_parser = subparsers.add_parser("export", description="export videos")
+    export_parser.add_argument("playlist_id", help="what to export")
+    export_parser.add_argument("-profile", choices=choice_profile, help="profile")
+    export_parser.add_argument("-quality", choices=choice_quality, help="quality")
+    export_parser.add_argument("-startat", type=int, help="first element index", default=1)
+    
+    export_parsers = export_parser.add_subparsers(dest="mode", help="where to export to")
+    
+    export_folder = export_parsers.add_parser("folder", description="copy videos to folder")
+    export_folder.add_argument("location", help="the folder location")
+    export_folder.add_argument("filename_template", help="how to name the video files: %n=index %t=title %e=extension %i=videoId %p=playlistTitle %x=playlistId %u=uploader", default="%n._%t.%e", nargs="?")
     
     # do the parsing
     args = parser.parse_args(argv[1:])
@@ -266,6 +277,8 @@ def main(argv):
         return run_command(args)
     elif args.command == "db":
         return db_command(args)
+    elif args.command == "export":
+        return export_command(args)
 
 
 def config_command(args):
@@ -295,6 +308,79 @@ def db_command(args):
     if args.mode == "v2import":
         v2import_command(args)
 
+
+def export_command(args):
+    """ the export subcommand """
+    session = args.db.Session()
+    
+    playlist = session.query(yfdb.Playlist).get(args.playlist_id)
+    
+    if not playlist:
+        print("[ERROR] Unknown Playlist ID: %s" % args.playlist_id)
+        return 1
+    
+    print("[EXPORT] Exporting from Playlist '%s' by %s" % (playlist.title, playlist.user_name))
+    
+    items = session.query(yfdb.PlaylistItem).filter(yfdb.PlaylistItem.playlist_id == playlist.id).filter(yfdb.PlaylistItem.index >= args.startat).all()
+    
+    job = yfdb.Job(quality=args.quality, profile=args.profile)
+    resolve = make_job_qa(args, job)
+    
+    nExported = 0
+    
+    if args.mode == "folder":
+        path = os.path.abspath(args.location)
+        
+        if not os.path.exists(path):
+            os.makedirs(path)
+        
+        print("[EXPORT] Exporting to folder '%s'" % path)
+        
+        for item in items:
+            local = session.query(yfdb.LocalVideo).filter(yfdb.LocalVideo.video_id == item.video_id).filter(yfdb.LocalVideo.fmt.in_(resolve)).order_by(yfdb.LocalVideo.fmt.desc()).first()
+            
+            if not local:
+                continue
+            
+            replace = {"n": str(item.index),
+                       "t": local.video.title,
+                       "e": fmtext[local.fmt],
+                       "i": local.video_id,
+                       "p": playlist.title,
+                       "x": playlist.id,
+                       "u": local.video.author.name}
+            
+            n = args.filename_template
+            
+            for replace, with_ in replace.items():
+                n = n.replace("%%%s" % replace, with_)
+            
+            n = tofilename(n)
+            
+            p = os.path.join(path, n)
+            s = make_absolute(local.location, args.root)
+            
+            progress = SimpleFileProgress("{position}/{total} {bar} {percent} {avgspeed} ETA: {eta}")
+            
+            stat = os.stat(s)
+            
+            progress.setup("", "", 0, stat.st_size)
+            
+            print("[EXPORT] Writing %s" % n)
+            progress.start()
+            with open(s, "rb") as fsrc:
+                with open(p, "wb") as fdst:
+                    while True:
+                        buf = fsrc.read(bytecount)
+                        if not buf:
+                            break
+                        fdst.write(buf)
+                        progress.position += len(buf)
+            progress.stop()
+            
+            nExported += 1
+    
+    print("[EXPORT] Done. Exported %i Items." % nExported)
 
 def job_command(args):
     """ the job command allows users to create and modify jobs """
@@ -639,11 +725,16 @@ def run_video(args, session, job, video, lookup_table):
     if args.d: return
     
     # check if we can access the video
-    fp = gdata("videos/%s" % video.id, raw=True)
+    try:
+        fp = gdata("videos/%s" % video.id, raw=True)
+    except request.HTTPError as e:
+        if e.getcode() == 403:
+            print("[ERROR] Cannot open Video Page")
+            return
     
     with fp:
         if fp.read(512) == "Private Video":
-            print("[VIDEO] Video '%s' is Private!" % video.title)
+            print("[ERROR] Video '%s' is Private!" % video.title)
             video.status |= video.ST_PRIVATE
             return
     
